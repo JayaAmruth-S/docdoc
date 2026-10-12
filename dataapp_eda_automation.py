@@ -2043,16 +2043,16 @@ def build_report(cfg: Config, tab_sections: list[tuple[str, list[dict]]],
             if not (len(groups) == 1 and variable.upper() == heading.upper()):
                 doc.add_heading(f"{n}. {variable}", level=2)
 
-            question: list[str] = [f"Variable: {variable}", QUESTION_LEAD]
-            for i, item in enumerate(grp["items"], 1):
-                question.append(f"{i}. UID: {item.get('label') or '(unnamed)'}")
-                question.extend(item["observations"])
-            add_box(doc, variable, cfg.delivered_by, question, "")
-
-            # charts follow the box, each captioned so it is obvious which UID
-            # and which series it belongs to
+            # one box per UID, immediately followed by that UID's own charts,
+            # so the text and the images it describes sit together
             for i, item in enumerate(grp["items"], 1):
                 label = item.get("label") or variable
+                add_box(doc, variable, cfg.delivered_by,
+                        [f"Variable: {variable}", QUESTION_LEAD,
+                         f"{i}. UID: {label}", *item["observations"]], "")
+                # Word fuses back-to-back tables into one; a UID whose images
+                # all went missing would otherwise merge into the next box
+                doc.add_paragraph()
                 for k, img in enumerate(item.get("images", []), 1):
                     path = img.get("path") if isinstance(img, dict) else img
                     trace = img.get("trace", "") if isinstance(img, dict) else ""
@@ -2135,9 +2135,11 @@ def read_context(bot: Bot) -> dict:
 def group_sections(sections: list[dict], profile: TabProfile,
                    bot: Bot) -> list[dict]:
     """
-    Turn per-chart results into report boxes.
+    Turn per-chart results into report variables, each holding its UIDs.
+    Every trace of one chart (count + value, impressions + net) lands in the
+    same UID, so the report shows that UID's box and then its own images.
 
-      single      -> one box for the whole tab            (Objective)
+      single      -> one variable for the whole tab, UIDs inside (Objective)
       by_variable -> one box per variable, UIDs inside    (Non-media)
                      'dispwofeatincrcaseper_bulleitwhiskey'
                        -> box 'dispwofeatincrcaseper', UID 'bulleitwhiskey'
@@ -2145,17 +2147,6 @@ def group_sections(sections: list[dict], profile: TabProfile,
                      'flavors_googleads_paidsearch_tra'
                        -> box 'paidsearch', UID the full chart name
     """
-    if profile.group_mode == "single":
-        items = []
-        for s in sections:
-            label = s["chart"] if not s["trace"] or s["trace"] in s["chart"] \
-                else f"{s['chart']} - {s['trace']}"
-            items.append({"label": label, "observations": s["observations"],
-                          "images": [{"path": s["image"],
-                                      "trace": s["trace"]}]})
-        return [{"data_type": profile.data_type or profile.heading,
-                 "items": items}]
-
     per_chart: dict[str, int] = {}
     for s in sections:
         per_chart[s["chart"]] = per_chart.get(s["chart"], 0) + 1
@@ -2163,7 +2154,9 @@ def group_sections(sections: list[dict], profile: TabProfile,
     order: list[str] = []
     buckets: dict[str, dict[str, dict]] = {}
     for s in sections:
-        if profile.group_mode == "by_channel":
+        if profile.group_mode == "single":
+            box = profile.data_type or profile.heading
+        elif profile.group_mode == "by_channel":
             box = channel_of(s["chart"])          # paidsearch, paidsocial, ...
         elif profile.group_mode == "by_feed":
             box = s.get("feed") or split_title(s["chart"])[0]
@@ -2796,13 +2789,190 @@ BAD = "#FF453A"
 
 
 FONT = "Segoe UI"
-RADIUS = 22
+RADIUS = 46          # capsule ends; small stages are a full pill (h/2)
 LOG_H = 190          # extra logical height when the log panel is open
 KEY = "#010203"      # keyed out to transparent, so the corners are really round
 PAD = 2              # breathing room so the rounded corners are not clipped
-INSET = 9            # widgets sit this far inside the pill, clear of the curve
+INSET = 11           # widgets sit this far inside the pill, clear of the curve
 BORDER = "#31313E"   # a hairline edge instead of a shadow: no repaint, no
                      # screen capture, nothing to go stale behind the window
+RIM_HI = "#8A8A9C"   # glass rim, lit from above ...
+RIM_LO = "#2A2A34"   # ... fading to the bottom edge
+MORPH_MS = 220       # island resize animation
+MORPH_STEPS = 14
+
+# Liquid glass: on Windows the island is a live acrylic blur of whatever sits
+# behind it (DWM does the blur, so nothing goes stale). DWM shows the blur
+# wherever Tk paints pure black, and composites every other colour on top of
+# it -- so the body is #000000 and the widgets keep their own colours.
+GLASS = sys.platform.startswith("win")
+GLASS_TINT = 0xB4140F0F   # AABBGGRR: dark smoke, ~70% opaque, keeps text legible
+BODY = "#000000" if GLASS else INK
+
+
+def enable_glass(win) -> None:
+    """Acrylic blur behind `win` via SetWindowCompositionAttribute."""
+    import ctypes
+    from ctypes import wintypes
+
+    class ACCENT_POLICY(ctypes.Structure):
+        _fields_ = [("AccentState", ctypes.c_int),
+                    ("AccentFlags", ctypes.c_int),
+                    ("GradientColor", wintypes.DWORD),
+                    ("AnimationId", ctypes.c_int)]
+
+    class WINCOMPATTRDATA(ctypes.Structure):
+        _fields_ = [("Attribute", ctypes.c_int),
+                    ("Data", ctypes.c_void_p),
+                    ("SizeOfData", ctypes.c_size_t)]
+
+    accent = ACCENT_POLICY(4, 0, GLASS_TINT, 0)   # 4 = ACRYLICBLURBEHIND
+    data = WINCOMPATTRDATA(19, ctypes.cast(ctypes.pointer(accent),     # 19 =
+                                           ctypes.c_void_p),            # ACCENT
+                           ctypes.sizeof(accent))                       # POLICY
+    fn = ctypes.windll.user32.SetWindowCompositionAttribute
+    fn.argtypes = [wintypes.HWND, ctypes.POINTER(WINCOMPATTRDATA)]
+    fn.restype = wintypes.BOOL
+    if not fn(_hwnd(win), ctypes.byref(data)):
+        raise OSError(f"SetWindowCompositionAttribute failed "
+                      f"(error {ctypes.GetLastError()})")
+
+
+def shape_window(win, w: int, h: int, r: int) -> None:
+    """Clip `win` (glass and all) to a rounded rectangle, physical pixels."""
+    import ctypes
+    gdi, user = ctypes.windll.gdi32, ctypes.windll.user32
+    rgn = gdi.CreateRoundRectRgn(PAD, PAD, w - PAD + 1, h - PAD + 1,
+                                 2 * r, 2 * r)
+    if not rgn or not user.SetWindowRgn(_hwnd(win), rgn, True):
+        raise OSError("could not shape the island window")
+    # the system owns the region from here on; it must not be deleted
+
+
+def _hwnd(win) -> int:
+    import ctypes
+    return ctypes.windll.user32.GetParent(win.winfo_id())
+
+
+class DatePopover(ctk.CTkToplevel):
+    """
+    A month calendar dropped under a date box. Picking a day writes it into
+    the box as YYYY-MM-DD; Clear empties it, which means "use the app's own
+    range". The box itself stays typeable.
+    """
+
+    def __init__(self, master, entry: ctk.CTkEntry, fallback: str,
+                 on_close) -> None:
+        super().__init__(master)
+        self.entry = entry
+        self.on_close = on_close
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.configure(fg_color=BODY)
+        self.bind("<Escape>", lambda e: self.close())
+
+        today = datetime.now().date()
+        self.today = today
+        self.picked = self._parse(entry.get()) or None
+        start = self.picked or self._parse(fallback) or today
+        self.year, self.month = start.year, start.month
+
+        frame = ctk.CTkFrame(self, fg_color=BODY, corner_radius=0,
+                             border_width=0 if GLASS else 1,
+                             border_color=BORDER)
+        frame.pack(fill="both", expand=True)
+        head = ctk.CTkFrame(frame, fg_color="transparent")
+        head.pack(fill="x", padx=10, pady=(10, 4))
+        nav = dict(width=28, height=24, corner_radius=12, fg_color=INK2,
+                   hover_color=INK3, text_color=TEXT,
+                   font=ctk.CTkFont(FONT, 12, "bold"))
+        ctk.CTkButton(head, text="\u2039", command=lambda: self._shift(-1),
+                      **nav).pack(side="left")
+        ctk.CTkButton(head, text="\u203a", command=lambda: self._shift(1),
+                      **nav).pack(side="right")
+        self.title_lbl = ctk.CTkLabel(head, text="", text_color=TEXT,
+                                      font=ctk.CTkFont(FONT, 12, "bold"))
+        self.title_lbl.pack(side="left", expand=True)
+
+        grid = ctk.CTkFrame(frame, fg_color="transparent")
+        grid.pack(padx=10)
+        for c, name in enumerate(("Mo", "Tu", "We", "Th", "Fr", "Sa", "Su")):
+            ctk.CTkLabel(grid, text=name, width=32, height=18,
+                         text_color=MUTED,
+                         font=ctk.CTkFont(FONT, 10)).grid(row=0, column=c)
+        self.cells: list[ctk.CTkButton] = []
+        for i in range(42):
+            b = ctk.CTkButton(grid, text="", width=32, height=26,
+                              corner_radius=13, border_width=0,
+                              font=ctk.CTkFont(FONT, 11))
+            b.grid(row=1 + i // 7, column=i % 7, padx=1, pady=1)
+            self.cells.append(b)
+
+        foot = ctk.CTkFrame(frame, fg_color="transparent")
+        foot.pack(fill="x", padx=10, pady=(6, 10))
+        small = dict(width=70, height=24, corner_radius=12, fg_color=INK2,
+                     hover_color=INK3, text_color=TEXT,
+                     font=ctk.CTkFont(FONT, 11))
+        ctk.CTkButton(foot, text="Clear", command=lambda: self._set(""),
+                      **small).pack(side="left")
+        ctk.CTkButton(foot, text="Today",
+                      command=lambda: self._set(today.isoformat()),
+                      **small).pack(side="right")
+
+        self._render()
+        self.update_idletasks()
+        self.geometry(f"+{entry.winfo_rootx()}"
+                      f"+{entry.winfo_rooty() + entry.winfo_height() + 6}")
+        if GLASS:
+            self.after(30, self._glass)
+
+    def _glass(self) -> None:
+        enable_glass(self)
+        shape_window(self, self.winfo_width(), self.winfo_height(),
+                     int(16 * self.winfo_fpixels("1i") / 96))
+
+    @staticmethod
+    def _parse(text: str):
+        try:
+            return datetime.strptime(text.strip(), "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+    def _shift(self, months: int) -> None:
+        m = self.month - 1 + months
+        self.year, self.month = self.year + m // 12, m % 12 + 1
+        self._render()
+
+    def _render(self) -> None:
+        import calendar
+        self.title_lbl.configure(text=f"{calendar.month_name[self.month]} "
+                                      f"{self.year}")
+        days = [d for week in calendar.Calendar().monthdatescalendar(
+            self.year, self.month) for d in week]
+        days += [None] * (42 - len(days))
+        for b, d in zip(self.cells, days):
+            if d is None or d.month != self.month:
+                b.configure(text="", state="disabled", fg_color="transparent",
+                            border_width=0)
+                continue
+            sel = d == self.picked
+            b.configure(text=str(d.day), state="normal",
+                        fg_color=ACCENT if sel else "transparent",
+                        hover_color="#0A6FD8" if sel else INK3,
+                        text_color="#FFFFFF" if sel else TEXT,
+                        border_width=1 if d == self.today and not sel else 0,
+                        border_color=ACCENT,
+                        command=lambda d=d: self._set(d.isoformat()))
+
+    def _set(self, iso: str) -> None:
+        self.entry.delete(0, "end")
+        if iso:
+            self.entry.insert(0, iso)
+        self.close()
+
+    def close(self) -> None:
+        self.on_close()
+        self.destroy()
 
 
 def _hex(rgb) -> str:
@@ -2827,13 +2997,18 @@ class Island(ctk.CTk):
         self._bg_key = None
         self._dragging = False
         self._user_placed = False
-        self.configure(fg_color=KEY)
-        try:
-            self.attributes("-transparentcolor", KEY)
-            self._keyed = True
-        except Exception:      # no key colour available: plain dark window
+        self._morph_job = None
+        if GLASS:              # shaped by a window region, see _paint_bg
             self._keyed = False
-            self.configure(fg_color=INK)
+            self.configure(fg_color=BODY)
+        else:
+            self.configure(fg_color=KEY)
+            try:
+                self.attributes("-transparentcolor", KEY)
+                self._keyed = True
+            except Exception:  # no key colour available: plain dark window
+                self._keyed = False
+                self.configure(fg_color=INK)
 
         self.q: queue.Queue[tuple[str, object]] = queue.Queue()
         self.worker: threading.Thread | None = None
@@ -2845,12 +3020,13 @@ class Island(ctk.CTk):
         # empty box keeps meaning "whatever the app has"
         self.app_dates: tuple[str, str] = ("", "")
         self.last_output: Path | None = None
+        self.date_pop: DatePopover | None = None
         self.log_open = False
         self._drag = (0, 0)
         self._bg_img = None
         self._stage_h = 176
 
-        w, h = 600, 118
+        w, h = 780, 96
         sc0 = self._scale()
         w = min(w, max(520, int(self.winfo_screenwidth() / sc0) - 24))
         self._wl_cur = w
@@ -2865,7 +3041,7 @@ class Island(ctk.CTk):
         # the island body sits inside the rim. CTk refuses width/height in
         # place(), so a plain tk.Frame does the inset and the card fills it.
         edge = PAD + INSET
-        self.card = tk.Frame(self, bg=INK, bd=0, highlightthickness=0)
+        self.card = tk.Frame(self, bg=BODY, bd=0, highlightthickness=0)
         self.card.place(x=edge, y=edge, relwidth=1, relheight=1,
                         width=-2 * edge, height=-2 * edge)
 
@@ -2892,6 +3068,8 @@ class Island(ctk.CTk):
         self.after(120, self._drain)
 
     def _first_paint(self):
+        if GLASS:
+            enable_glass(self)
         self._paint_bg()
 
     # ------------------------------------------------------------------ #
@@ -2906,10 +3084,11 @@ class Island(ctk.CTk):
 
     def _paint_bg(self, recapture=False):
         """
-        The island is a flat rounded pill: transparent outside, dark inside,
-        with a hairline edge. No shadow and no screen capture -- both had to be
-        composited against whatever sat behind the window, which went stale and
-        left grey bands on screen.
+        The island is a capsule: round ends while it is compact, a softly
+        rounded slab once it grows. On Windows the body is live acrylic glass
+        (DWM blurs what is behind it) with a rim lit from above; elsewhere a
+        flat dark pill. No screen capture -- that went stale and left grey
+        bands on screen.
         """
         from PIL import Image, ImageDraw, ImageTk
         w, h = self.winfo_width(), self.winfo_height()
@@ -2920,12 +3099,27 @@ class Island(ctk.CTk):
         self._bg_key = (w, h)
 
         pill = [PAD, PAD, w - PAD - 1, h - PAD - 1]
-        r = max(12, min(RADIUS, (pill[3] - pill[1]) // 2))
+        r = max(12, min(int(RADIUS * self._scale()), (pill[3] - pill[1]) // 2))
 
-        base = Image.new("RGB", (w, h), _rgb(KEY) if self._keyed else _rgb(INK))
+        outside = _rgb(KEY) if self._keyed else _rgb(BODY)
+        base = Image.new("RGB", (w, h), outside)
         d = ImageDraw.Draw(base)
-        d.rounded_rectangle(pill, radius=r, fill=_rgb(INK),
-                            outline=_rgb(BORDER), width=1)
+        if GLASS:
+            # rim: a vertical light-to-dark gradient, masked to a 1px ring
+            ring = Image.new("L", (w, h), 0)
+            ImageDraw.Draw(ring).rounded_rectangle(pill, radius=r, outline=255,
+                                                   width=1)
+            hi, lo = _rgb(RIM_HI), _rgb(RIM_LO)
+            grad = Image.new("RGB", (1, h))
+            for yy in range(h):
+                t = min(1.0, yy / max(1, h * 0.6))
+                grad.putpixel((0, yy), tuple(int(a + (b - a) * t)
+                                             for a, b in zip(hi, lo)))
+            base.paste(grad.resize((w, h)), (0, 0), ring)
+            shape_window(self, w, h, r)
+        else:
+            d.rounded_rectangle(pill, radius=r, fill=_rgb(INK),
+                                outline=_rgb(BORDER), width=1)
 
         self._bg_img = ImageTk.PhotoImage(base)
         self.bg.configure(image=self._bg_img)
@@ -2999,6 +3193,7 @@ class Island(ctk.CTk):
             self._bind_drag(child)
 
     def _drag_start(self, e):
+        self._close_calendar()          # it would be left floating behind
         self._dragging = True
         self._drag = (e.x_root - self.winfo_x(), e.y_root - self.winfo_y())
 
@@ -3018,10 +3213,11 @@ class Island(ctk.CTk):
     def _grip(self):
         # a real tk widget (CTk composites swallow the click) and big enough to
         # actually grab
-        self.grip = tk.Frame(self, bg=INK, width=18, height=18, cursor="bottom_right_corner")
+        self.grip = tk.Frame(self, bg=BODY, width=18, height=18,
+                             cursor="bottom_right_corner")
         self.grip.place(relx=1.0, rely=1.0, anchor="se",
-                        x=-(PAD + 3), y=-(PAD + 3))
-        self.gripdot = tk.Label(self.grip, text="◢", bg=INK, fg=INK3, bd=0,
+                        x=-(PAD + 14), y=-(PAD + 6))   # inside the curve
+        self.gripdot = tk.Label(self.grip, text="◢", bg=BODY, fg=INK3, bd=0,
                                 font=(FONT, 8), cursor="bottom_right_corner")
         self.gripdot.place(relx=1.0, rely=1.0, anchor="se")
         for w in (self.grip, self.gripdot):
@@ -3040,7 +3236,7 @@ class Island(ctk.CTk):
         hl = max(140, int(h0 + (e.y_root - y0) / sc))
         self._stage_h = hl - (LOG_H if self.log_open else 0)
         self._wl_cur = wl
-        self._apply_geometry(wl, hl, keep_center=False)
+        self._apply_geometry(wl, hl, keep_center=False, animate=False)
         self._paint_bg()
 
     def _toggle_log(self):
@@ -3071,11 +3267,13 @@ class Island(ctk.CTk):
         """Intended width in logical units (what geometry() expects)."""
         return max(520, min(self._max_wl(), self._wl_cur))
 
-    def _apply_geometry(self, wl: int, hl: int, keep_center: bool = True):
+    def _apply_geometry(self, wl: int, hl: int, keep_center: bool = True,
+                        animate: bool = True):
         """
         Resize about the island's own centre. geometry() takes logical units,
         winfo_* returns physical, so the centre is worked out in physical and
-        only the size is handed back logical.
+        only the size is handed back logical. Stage changes morph to the new
+        size the way the Dynamic Island does; a drag on the grip is direct.
         """
         sc = self._scale()
         wl = max(520, min(wl, self._max_wl()))    # never wider than the screen
@@ -3092,7 +3290,25 @@ class Island(ctk.CTk):
             x = max(0, (sw - new_w) // 2)   # only auto-place before you move it
         x = max(140 - new_w, min(x, sw - 140))
         y = max(0, y)
-        self.geometry(f"{wl}x{hl}+{x}+{y}")
+        if self._morph_job is not None:
+            self.after_cancel(self._morph_job)
+            self._morph_job = None
+        if not animate or old_w <= 1:
+            self.geometry(f"{wl}x{hl}+{x}+{y}")
+            return
+        self._morph((self.winfo_width() / sc, self.winfo_height() / sc,
+                     self.winfo_x(), self.winfo_y()), (wl, hl, x, y), 1)
+
+    def _morph(self, a, b, step: int):
+        t = step / MORPH_STEPS
+        e = 1 - (1 - t) ** 3                       # ease-out cubic
+        w, h, x, y = (int(round(p + (q - p) * e)) for p, q in zip(a, b))
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        if step < MORPH_STEPS:
+            self._morph_job = self.after(MORPH_MS // MORPH_STEPS,
+                                         self._morph, a, b, step + 1)
+        else:
+            self._morph_job = None
 
     def _fit(self, h=None):
         """
@@ -3116,6 +3332,7 @@ class Island(ctk.CTk):
     # builders
     # ------------------------------------------------------------------ #
     def _clear(self):
+        self._close_calendar()
         self._wrapped = []
         for w in self.body.winfo_children():
             w.destroy()
@@ -3313,7 +3530,7 @@ class Island(ctk.CTk):
     def stage_bar(self):
         self._clear()
         self.title_lbl.configure(text=self.cfg.schema or "Data Sanity")
-        want = min(820, self._max_wl())
+        want = min(880, self._max_wl())
         if self._wl < want:
             self._apply_geometry(want, self._stage_h)
             self.update_idletasks()
@@ -3326,20 +3543,10 @@ class Island(ctk.CTk):
         # has for each tab and feed, which is what the report should quote.
         ctk.CTkLabel(top, text="From", text_color=MUTED,
                      font=ctk.CTkFont(FONT, 11)).pack(side="left", padx=(2, 6))
-        self.e_from = ctk.CTkEntry(top, width=94, height=27, corner_radius=14,
-                                   fg_color=INK2, border_width=0,
-                                   text_color=TEXT, justify="center",
-                                   placeholder_text=self.app_dates[0] or "auto",
-                                   font=ctk.CTkFont(FONT, 12))
-        self.e_from.pack(side="left")
+        self.e_from = self._date_box(top, 0)
         ctk.CTkLabel(top, text="to", text_color=MUTED,
                      font=ctk.CTkFont(FONT, 11)).pack(side="left", padx=8)
-        self.e_to = ctk.CTkEntry(top, width=94, height=27, corner_radius=14,
-                                 fg_color=INK2, border_width=0,
-                                 text_color=TEXT, justify="center",
-                                 placeholder_text=self.app_dates[1] or "auto",
-                                 font=ctk.CTkFont(FONT, 12))
-        self.e_to.pack(side="left")
+        self.e_to = self._date_box(top, 1)
         self.btn_dates = ctk.CTkButton(
             top, text="\u21bb", command=self.do_refresh_dates, width=30,
             height=27, corner_radius=14, fg_color=INK2, hover_color=INK3,
@@ -3373,6 +3580,38 @@ class Island(ctk.CTk):
             self.say("pick your sections and press Run")
         self._fit(140)
 
+    def _date_box(self, parent, which: int) -> ctk.CTkEntry:
+        """A date entry with a calendar button fused onto its right end."""
+        box = ctk.CTkFrame(parent, fg_color=INK2, corner_radius=14, height=27)
+        box.pack(side="left")
+        # square entry inset past the box's rounded end, so no corner pokes out
+        entry = ctk.CTkEntry(box, width=88, height=23, corner_radius=0,
+                             fg_color=INK2, border_width=0, text_color=TEXT,
+                             justify="center",
+                             placeholder_text=self.app_dates[which] or "auto",
+                             font=ctk.CTkFont(FONT, 12))
+        entry.pack(side="left", padx=(10, 0), pady=2)
+        ctk.CTkButton(box, text="\u25be", width=24, height=23,
+                      corner_radius=12, fg_color=INK2, hover_color=INK3,
+                      text_color=MUTED, font=ctk.CTkFont(FONT, 12),
+                      command=lambda: self._toggle_calendar(entry, which)
+                      ).pack(side="left", padx=(0, 2))
+        return entry
+
+    def _toggle_calendar(self, entry: ctk.CTkEntry, which: int) -> None:
+        opened_for = self.date_pop.entry if self.date_pop else None
+        self._close_calendar()
+        if opened_for is not entry:
+            self.date_pop = DatePopover(self, entry, self.app_dates[which],
+                                        on_close=self._forget_calendar)
+
+    def _forget_calendar(self) -> None:
+        self.date_pop = None
+
+    def _close_calendar(self) -> None:
+        if self.date_pop is not None:
+            self.date_pop.close()
+
     def _toggle_chip(self, name):
         self.chosen[name] = not self.chosen[name]
         self._paint_chips()
@@ -3385,6 +3624,7 @@ class Island(ctk.CTk):
                         text_color="#FFFFFF" if on else MUTED)
 
     def do_run(self):
+        self._close_calendar()
         picked = tuple(n for n in SECTION_ORDER if self.chosen[n])
         if not picked:
             self.say("tick at least one section", WARN)
