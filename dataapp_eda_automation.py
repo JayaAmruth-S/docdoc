@@ -2793,7 +2793,8 @@ RADIUS = 60          # near-stadium ends; the log-open slab stays soft
 LOG_H = 190          # extra logical height when the log panel is open
 KEY = "#010203"      # keyed out to transparent, so the corners are really round
 PAD = 2              # breathing room so the rounded corners are not clipped
-INSET = 11           # widgets sit this far inside the pill, clear of the curve
+INSET = 19           # the square body's corners must stay inside the curve:
+                     # needs INSET >= RADIUS * (1 - 1/sqrt 2) = 17.6
 BORDER = "#1C1C24"   # a hairline edge instead of a shadow: no repaint, no
                      # screen capture, nothing to go stale behind the window
 MORPH_MS = 220       # island resize animation
@@ -2978,7 +2979,7 @@ class Island(ctk.CTk):
 
         # the island body sits inside the rim. CTk refuses width/height in
         # place(), so a plain tk.Frame does the inset and the card fills it.
-        edge = PAD + INSET
+        edge = self._edge = PAD + int(INSET * sc0 + 0.5)  # radius is scaled too
         self.card = tk.Frame(self, bg=INK, bd=0, highlightthickness=0)
         self.card.place(x=edge, y=edge, relwidth=1, relheight=1,
                         width=-2 * edge, height=-2 * edge)
@@ -2987,13 +2988,13 @@ class Island(ctk.CTk):
         self.status = ctk.CTkLabel(self.card, text="", anchor="w",
                                    text_color=MUTED,
                                    font=ctk.CTkFont(FONT, 11))
-        self.status.pack(side="bottom", fill="x", padx=29, pady=(0, 7))
+        self.status.pack(side="bottom", fill="x", padx=21, pady=(0, 1))
         self.logbox = ctk.CTkTextbox(self.card, height=180, fg_color=INK2,
                                      border_width=0, text_color=MUTED,
                                      corner_radius=12, wrap="word",
                                      font=ctk.CTkFont("Consolas", 11))
         self.body = ctk.CTkFrame(self.card, fg_color="transparent")
-        self.body.pack(side="top", fill="both", expand=True, padx=26, pady=(1, 2))
+        self.body.pack(side="top", fill="both", expand=True, padx=18, pady=(1, 2))
 
         self._grip()
         self._bind_drag(self.bg)
@@ -3060,7 +3061,7 @@ class Island(ctk.CTk):
     # ------------------------------------------------------------------ #
     def _build_header(self):
         bar = ctk.CTkFrame(self.card, fg_color="transparent", height=26)
-        bar.pack(side="top", fill="x", padx=24, pady=(8, 0))
+        bar.pack(side="top", fill="x", padx=16, pady=(2, 0))
         bar.pack_propagate(False)
 
         self.dot = ctk.CTkLabel(bar, text="●", text_color=ACCENT, width=10,
@@ -3237,7 +3238,7 @@ class Island(ctk.CTk):
         """
         self.update_idletasks()
         sc = self._scale()
-        need = int((self.card.winfo_reqheight() + 2 * (PAD + INSET)) / sc) + 4
+        need = int((self.card.winfo_reqheight() + 2 * self._edge) / sc) + 4
         h = max(h or self._stage_h, need)
         self._stage_h = h
         total = h + (LOG_H if self.log_open else 0)
