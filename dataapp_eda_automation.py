@@ -2777,7 +2777,7 @@ import tkinter as tk
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
-INK = "#0C0C11"          # island body
+INK = "#000000"          # island body: true black, like the Dynamic Island
 INK2 = "#1B1B24"         # raised surface
 INK3 = "#262633"         # hover
 TEXT = "#F5F5F7"
@@ -2789,69 +2789,16 @@ BAD = "#FF453A"
 
 
 FONT = "Segoe UI"
-RADIUS = 46          # capsule ends; small stages are a full pill (h/2)
+RADIUS = 60          # near-stadium ends; the log-open slab stays soft
 LOG_H = 190          # extra logical height when the log panel is open
 KEY = "#010203"      # keyed out to transparent, so the corners are really round
 PAD = 2              # breathing room so the rounded corners are not clipped
-INSET = 11           # widgets sit this far inside the pill, clear of the curve
-BORDER = "#31313E"   # a hairline edge instead of a shadow: no repaint, no
+INSET = 19           # the square body's corners must stay inside the curve:
+                     # needs INSET >= RADIUS * (1 - 1/sqrt 2) = 17.6
+BORDER = "#1C1C24"   # a hairline edge instead of a shadow: no repaint, no
                      # screen capture, nothing to go stale behind the window
-RIM_HI = "#8A8A9C"   # glass rim, lit from above ...
-RIM_LO = "#2A2A34"   # ... fading to the bottom edge
 MORPH_MS = 220       # island resize animation
 MORPH_STEPS = 14
-
-# Liquid glass: on Windows the island is a live acrylic blur of whatever sits
-# behind it (DWM does the blur, so nothing goes stale). DWM shows the blur
-# wherever Tk paints pure black, and composites every other colour on top of
-# it -- so the body is #000000 and the widgets keep their own colours.
-GLASS = sys.platform.startswith("win")
-GLASS_TINT = 0xB4140F0F   # AABBGGRR: dark smoke, ~70% opaque, keeps text legible
-BODY = "#000000" if GLASS else INK
-
-
-def enable_glass(win) -> None:
-    """Acrylic blur behind `win` via SetWindowCompositionAttribute."""
-    import ctypes
-    from ctypes import wintypes
-
-    class ACCENT_POLICY(ctypes.Structure):
-        _fields_ = [("AccentState", ctypes.c_int),
-                    ("AccentFlags", ctypes.c_int),
-                    ("GradientColor", wintypes.DWORD),
-                    ("AnimationId", ctypes.c_int)]
-
-    class WINCOMPATTRDATA(ctypes.Structure):
-        _fields_ = [("Attribute", ctypes.c_int),
-                    ("Data", ctypes.c_void_p),
-                    ("SizeOfData", ctypes.c_size_t)]
-
-    accent = ACCENT_POLICY(4, 0, GLASS_TINT, 0)   # 4 = ACRYLICBLURBEHIND
-    data = WINCOMPATTRDATA(19, ctypes.cast(ctypes.pointer(accent),     # 19 =
-                                           ctypes.c_void_p),            # ACCENT
-                           ctypes.sizeof(accent))                       # POLICY
-    fn = ctypes.windll.user32.SetWindowCompositionAttribute
-    fn.argtypes = [wintypes.HWND, ctypes.POINTER(WINCOMPATTRDATA)]
-    fn.restype = wintypes.BOOL
-    if not fn(_hwnd(win), ctypes.byref(data)):
-        raise OSError(f"SetWindowCompositionAttribute failed "
-                      f"(error {ctypes.GetLastError()})")
-
-
-def shape_window(win, w: int, h: int, r: int) -> None:
-    """Clip `win` (glass and all) to a rounded rectangle, physical pixels."""
-    import ctypes
-    gdi, user = ctypes.windll.gdi32, ctypes.windll.user32
-    rgn = gdi.CreateRoundRectRgn(PAD, PAD, w - PAD + 1, h - PAD + 1,
-                                 2 * r, 2 * r)
-    if not rgn or not user.SetWindowRgn(_hwnd(win), rgn, True):
-        raise OSError("could not shape the island window")
-    # the system owns the region from here on; it must not be deleted
-
-
-def _hwnd(win) -> int:
-    import ctypes
-    return ctypes.windll.user32.GetParent(win.winfo_id())
 
 
 class DatePopover(ctk.CTkToplevel):
@@ -2868,7 +2815,11 @@ class DatePopover(ctk.CTkToplevel):
         self.on_close = on_close
         self.overrideredirect(True)
         self.attributes("-topmost", True)
-        self.configure(fg_color=BODY)
+        self.configure(fg_color=KEY)
+        try:
+            self.attributes("-transparentcolor", KEY)
+        except tk.TclError:    # no colour key on this platform: square corners
+            self.configure(fg_color=INK)
         self.bind("<Escape>", lambda e: self.close())
 
         today = datetime.now().date()
@@ -2877,9 +2828,8 @@ class DatePopover(ctk.CTkToplevel):
         start = self.picked or self._parse(fallback) or today
         self.year, self.month = start.year, start.month
 
-        frame = ctk.CTkFrame(self, fg_color=BODY, corner_radius=0,
-                             border_width=0 if GLASS else 1,
-                             border_color=BORDER)
+        frame = ctk.CTkFrame(self, fg_color=INK, corner_radius=18,
+                             border_width=1, border_color=BORDER)
         frame.pack(fill="both", expand=True)
         head = ctk.CTkFrame(frame, fg_color="transparent")
         head.pack(fill="x", padx=10, pady=(10, 4))
@@ -2923,13 +2873,6 @@ class DatePopover(ctk.CTkToplevel):
         self.update_idletasks()
         self.geometry(f"+{entry.winfo_rootx()}"
                       f"+{entry.winfo_rooty() + entry.winfo_height() + 6}")
-        if GLASS:
-            self.after(30, self._glass)
-
-    def _glass(self) -> None:
-        enable_glass(self)
-        shape_window(self, self.winfo_width(), self.winfo_height(),
-                     int(16 * self.winfo_fpixels("1i") / 96))
 
     @staticmethod
     def _parse(text: str):
@@ -2998,17 +2941,13 @@ class Island(ctk.CTk):
         self._dragging = False
         self._user_placed = False
         self._morph_job = None
-        if GLASS:              # shaped by a window region, see _paint_bg
+        self.configure(fg_color=KEY)
+        try:
+            self.attributes("-transparentcolor", KEY)
+            self._keyed = True
+        except Exception:      # no key colour available: plain dark window
             self._keyed = False
-            self.configure(fg_color=BODY)
-        else:
-            self.configure(fg_color=KEY)
-            try:
-                self.attributes("-transparentcolor", KEY)
-                self._keyed = True
-            except Exception:  # no key colour available: plain dark window
-                self._keyed = False
-                self.configure(fg_color=INK)
+            self.configure(fg_color=INK)
 
         self.q: queue.Queue[tuple[str, object]] = queue.Queue()
         self.worker: threading.Thread | None = None
@@ -3040,8 +2979,8 @@ class Island(ctk.CTk):
 
         # the island body sits inside the rim. CTk refuses width/height in
         # place(), so a plain tk.Frame does the inset and the card fills it.
-        edge = PAD + INSET
-        self.card = tk.Frame(self, bg=BODY, bd=0, highlightthickness=0)
+        edge = self._edge = PAD + int(INSET * sc0 + 0.5)  # radius is scaled too
+        self.card = tk.Frame(self, bg=INK, bd=0, highlightthickness=0)
         self.card.place(x=edge, y=edge, relwidth=1, relheight=1,
                         width=-2 * edge, height=-2 * edge)
 
@@ -3049,13 +2988,13 @@ class Island(ctk.CTk):
         self.status = ctk.CTkLabel(self.card, text="", anchor="w",
                                    text_color=MUTED,
                                    font=ctk.CTkFont(FONT, 11))
-        self.status.pack(side="bottom", fill="x", padx=17, pady=(0, 7))
+        self.status.pack(side="bottom", fill="x", padx=21, pady=(0, 1))
         self.logbox = ctk.CTkTextbox(self.card, height=180, fg_color=INK2,
                                      border_width=0, text_color=MUTED,
                                      corner_radius=12, wrap="word",
                                      font=ctk.CTkFont("Consolas", 11))
         self.body = ctk.CTkFrame(self.card, fg_color="transparent")
-        self.body.pack(side="top", fill="both", expand=True, padx=14, pady=(1, 2))
+        self.body.pack(side="top", fill="both", expand=True, padx=18, pady=(1, 2))
 
         self._grip()
         self._bind_drag(self.bg)
@@ -3068,8 +3007,6 @@ class Island(ctk.CTk):
         self.after(120, self._drain)
 
     def _first_paint(self):
-        if GLASS:
-            enable_glass(self)
         self._paint_bg()
 
     # ------------------------------------------------------------------ #
@@ -3084,11 +3021,10 @@ class Island(ctk.CTk):
 
     def _paint_bg(self, recapture=False):
         """
-        The island is a capsule: round ends while it is compact, a softly
-        rounded slab once it grows. On Windows the body is live acrylic glass
-        (DWM blurs what is behind it) with a rim lit from above; elsewhere a
-        flat dark pill. No screen capture -- that went stale and left grey
-        bands on screen.
+        The island is a black capsule: round ends while it is compact, a
+        softly rounded slab once it grows. No screen capture or DWM blur --
+        the first went stale, and DWM adds Tk's colours onto the blur, which
+        washed every colour out.
         """
         from PIL import Image, ImageDraw, ImageTk
         w, h = self.winfo_width(), self.winfo_height()
@@ -3101,25 +3037,9 @@ class Island(ctk.CTk):
         pill = [PAD, PAD, w - PAD - 1, h - PAD - 1]
         r = max(12, min(int(RADIUS * self._scale()), (pill[3] - pill[1]) // 2))
 
-        outside = _rgb(KEY) if self._keyed else _rgb(BODY)
-        base = Image.new("RGB", (w, h), outside)
-        d = ImageDraw.Draw(base)
-        if GLASS:
-            # rim: a vertical light-to-dark gradient, masked to a 1px ring
-            ring = Image.new("L", (w, h), 0)
-            ImageDraw.Draw(ring).rounded_rectangle(pill, radius=r, outline=255,
-                                                   width=1)
-            hi, lo = _rgb(RIM_HI), _rgb(RIM_LO)
-            grad = Image.new("RGB", (1, h))
-            for yy in range(h):
-                t = min(1.0, yy / max(1, h * 0.6))
-                grad.putpixel((0, yy), tuple(int(a + (b - a) * t)
-                                             for a, b in zip(hi, lo)))
-            base.paste(grad.resize((w, h)), (0, 0), ring)
-            shape_window(self, w, h, r)
-        else:
-            d.rounded_rectangle(pill, radius=r, fill=_rgb(INK),
-                                outline=_rgb(BORDER), width=1)
+        base = Image.new("RGB", (w, h), _rgb(KEY) if self._keyed else _rgb(INK))
+        ImageDraw.Draw(base).rounded_rectangle(pill, radius=r, fill=_rgb(INK),
+                                               outline=_rgb(BORDER), width=1)
 
         self._bg_img = ImageTk.PhotoImage(base)
         self.bg.configure(image=self._bg_img)
@@ -3141,7 +3061,7 @@ class Island(ctk.CTk):
     # ------------------------------------------------------------------ #
     def _build_header(self):
         bar = ctk.CTkFrame(self.card, fg_color="transparent", height=26)
-        bar.pack(side="top", fill="x", padx=12, pady=(8, 0))
+        bar.pack(side="top", fill="x", padx=16, pady=(2, 0))
         bar.pack_propagate(False)
 
         self.dot = ctk.CTkLabel(bar, text="●", text_color=ACCENT, width=10,
@@ -3213,11 +3133,11 @@ class Island(ctk.CTk):
     def _grip(self):
         # a real tk widget (CTk composites swallow the click) and big enough to
         # actually grab
-        self.grip = tk.Frame(self, bg=BODY, width=18, height=18,
+        self.grip = tk.Frame(self, bg=INK, width=18, height=18,
                              cursor="bottom_right_corner")
         self.grip.place(relx=1.0, rely=1.0, anchor="se",
-                        x=-(PAD + 14), y=-(PAD + 6))   # inside the curve
-        self.gripdot = tk.Label(self.grip, text="◢", bg=BODY, fg=INK3, bd=0,
+                        x=-(PAD + 26), y=-(PAD + 12))   # inside the curve
+        self.gripdot = tk.Label(self.grip, text="◢", bg=INK, fg=INK3, bd=0,
                                 font=(FONT, 8), cursor="bottom_right_corner")
         self.gripdot.place(relx=1.0, rely=1.0, anchor="se")
         for w in (self.grip, self.gripdot):
@@ -3318,7 +3238,7 @@ class Island(ctk.CTk):
         """
         self.update_idletasks()
         sc = self._scale()
-        need = int((self.card.winfo_reqheight() + 2 * (PAD + INSET)) / sc) + 4
+        need = int((self.card.winfo_reqheight() + 2 * self._edge) / sc) + 4
         h = max(h or self._stage_h, need)
         self._stage_h = h
         total = h + (LOG_H if self.log_open else 0)
